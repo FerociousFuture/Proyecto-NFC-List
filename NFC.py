@@ -16,7 +16,7 @@ try:
         
         # Imprime la información detectada
         print("-" * 30)
-        print("¡Tarjeta detectada!")
+        print("Tarjeta detectada")
         print(f"ID de la tarjeta: {id}")
         
         # Verifica si hay texto almacenado y lo imprime
