@@ -6,42 +6,40 @@ from datetime import datetime
 import os
 import sys
 
-# --- Configuraciones de Archivos ---
+# --- Configuraciones de Archivos (TODOS CSV) ---
 ARCHIVO_USUARIOS = "usuarios.csv"
-ARCHIVO_ESTADOS = "estados.csv"
-ARCHIVO_REGISTRO = "registro_accesos.txt"
+ARCHIVO_ESTADOS = "estados.csv"       # Almacena el estado (ENTRADA/SALIDA) y la hora de la última ENTRADA
+ARCHIVO_ACCESOS = "registro_accesos.csv" # Log de todos los eventos (ENTRADA/SALIDA)
+ARCHIVO_TIEMPOS = "registro_tiempos.csv" # Log de permanencia (Entrada -> Salida)
 
 # --- Estructuras Globales ---
-USUARIOS = {} # UID: {'nombre': '', 'matricula': ''}
-ESTADOS_ACCESO = {} # UID: 'ENTRADA' o 'SALIDA'
+USUARIOS = {}          # UID: {'nombre': '', 'matricula': ''}
+ESTADOS_ACCESO = {}    # UID: {'estado': 'ENTRADA'/'SALIDA', 'ultima_entrada': 'YYYY-MM-DD HH:MM:SS'}
 
 # Crea una instancia del lector
 reader = SimpleMFRC522()
 
 # ==============================================================================
-# 1. GESTIÓN DE ARCHIVOS
+# 1. GESTIÓN DE ARCHIVOS Y DATOS
 # ==============================================================================
 
 def inicializar_archivos():
-    """Asegura que los archivos existan y tengan encabezados."""
+    """Asegura que los archivos CSV existan y tengan encabezados."""
     
-    # Inicializar USUARIOS.CSV
-    if not os.path.exists(ARCHIVO_USUARIOS):
-        with open(ARCHIVO_USUARIOS, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['UID', 'Nombre', 'Matricula'])
+    # Archivos que requieren encabezados si son nuevos:
+    archivos_config = {
+        ARCHIVO_USUARIOS: ['UID', 'Nombre', 'Matricula'],
+        ARCHIVO_ESTADOS: ['UID', 'Estado', 'Ultima_Entrada_Timestamp'],
+        ARCHIVO_ACCESOS: ['Timestamp', 'Matricula', 'Nombre', 'Evento'],
+        ARCHIVO_TIEMPOS: ['Timestamp_Salida', 'Matricula', 'Nombre', 'Tiempo_Total_Permanencia_Horas']
+    }
     
-    # Inicializar ESTADOS.CSV
-    if not os.path.exists(ARCHIVO_ESTADOS):
-        with open(ARCHIVO_ESTADOS, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['UID', 'Estado'])
-            
-    # Inicializar REGISTRO_ACCESOS.TXT
-    if not os.path.exists(ARCHIVO_REGISTRO):
-        with open(ARCHIVO_REGISTRO, 'w') as f:
-            f.write("Timestamp,Matricula,Nombre,Evento\n")
-            
+    for nombre_archivo, encabezados in archivos_config.items():
+        if not os.path.exists(nombre_archivo):
+            with open(nombre_archivo, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(encabezados)
+
 def cargar_datos():
     """Carga los usuarios y sus estados actuales de los CSV."""
     global USUARIOS, ESTADOS_ACCESO
@@ -52,22 +50,23 @@ def cargar_datos():
         # Cargar USUARIOS.CSV
         with open(ARCHIVO_USUARIOS, mode='r', newline='', encoding='utf-8') as f:
             lector_csv = csv.reader(f)
-            next(lector_csv) # Saltar encabezados
+            next(lector_csv) 
             for uid, nombre, matricula in lector_csv:
                 try:
                     USUARIOS[int(uid)] = {'nombre': nombre.strip(), 'matricula': matricula.strip()}
                 except ValueError:
-                    print(f"UID inválido en usuarios.csv: {uid}. Saltando.")
+                    continue
 
         # Cargar ESTADOS.CSV
         with open(ARCHIVO_ESTADOS, mode='r', newline='', encoding='utf-8') as f:
             lector_csv = csv.reader(f)
-            next(lector_csv) # Saltar encabezados
-            for uid, estado in lector_csv:
+            next(lector_csv) 
+            for uid, estado, timestamp in lector_csv:
                 try:
-                    ESTADOS_ACCESO[int(uid)] = estado.strip()
+                    # Almacenar el estado y la hora de la última entrada
+                    ESTADOS_ACCESO[int(uid)] = {'estado': estado.strip(), 'ultima_entrada': timestamp.strip()}
                 except ValueError:
-                    print(f"UID inválido en estados.csv: {uid}. Saltando.")
+                    continue
                     
         print(f"Sistema inicializado: {len(USUARIOS)} usuarios cargados.")
         return True
@@ -81,41 +80,50 @@ def guardar_estados():
     try:
         with open(ARCHIVO_ESTADOS, mode='w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['UID', 'Estado'])
-            for uid, estado in ESTADOS_ACCESO.items():
-                writer.writerow([uid, estado])
+            writer.writerow(['UID', 'Estado', 'Ultima_Entrada_Timestamp'])
+            for uid, data in ESTADOS_ACCESO.items():
+                writer.writerow([uid, data['estado'], data['ultima_entrada']])
     except Exception as e:
         print(f"*** ERROR al guardar estados: {e}")
         
-def registrar_evento(datos_usuario, evento):
-    """Guarda el evento (ENTRADA/SALIDA) en el log de accesos."""
+def registrar_evento_acceso(datos_usuario, evento):
+    """Guarda el evento (ENTRADA/SALIDA) en el log de accesos (CSV)."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    linea_registro = f"{timestamp},{datos_usuario['matricula']},{datos_usuario['nombre']},{evento}\n"
+    try:
+        with open(ARCHIVO_ACCESOS, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([timestamp, datos_usuario['matricula'], datos_usuario['nombre'], evento])
+        print(f"   -> Evento {evento} REGISTRADO en '{ARCHIVO_ACCESOS}'")
+    except IOError as e:
+        print(f"*** ERROR al escribir en el archivo de accesos: {e}")
+
+def registrar_tiempo_permanencia(datos_usuario, tiempo_permanencia):
+    """Guarda el tiempo total de permanencia en el log de tiempos (CSV)."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     try:
-        with open(ARCHIVO_REGISTRO, 'a') as f:
-            f.write(linea_registro)
-        print(f"   -> Evento {evento} REGISTRADO en '{ARCHIVO_REGISTRO}'")
+        with open(ARCHIVO_TIEMPOS, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([timestamp, datos_usuario['matricula'], datos_usuario['nombre'], tiempo_permanencia])
+        print(f"   -> Tiempo de permanencia GUARDADO en '{ARCHIVO_TIEMPOS}'")
     except IOError as e:
-        print(f"*** ERROR al escribir en el archivo de registro: {e}")
+        print(f"*** ERROR al escribir en el archivo de tiempos: {e}")
 
 # ==============================================================================
 # 2. FUNCIÓN DE REGISTRO (ALTA DE USUARIOS)
 # ==============================================================================
 
 def registrar_usuario():
-    """
-    Función de Interfaz para dar de alta un nuevo usuario.
-    Lee el UID de la tarjeta y pide los datos.
-    """
+    """Interfaz para dar de alta un nuevo usuario."""
+    # ... (El código de esta función es idéntico a la versión anterior) ...
+    # Se mantiene el código anterior por la modularidad
     print("\n" + "="*50)
     print("      MODO DE REGISTRO DE NUEVO USUARIO")
     print("="*50)
     print("PASO 1: Por favor, coloque la tarjeta cerca del lector para leer el ID.")
 
     try:
-        # read_id() bloquea hasta que detecta una tarjeta
         uid_nuevo = reader.read_id()
         
         if uid_nuevo in USUARIOS:
@@ -127,7 +135,6 @@ def registrar_usuario():
 
         print(f"\nTarjeta detectada. UID de Hardware: {uid_nuevo}")
         
-        # PASO 2: Pedir datos al usuario
         nombre = input("PASO 2: Ingrese el Nombre Completo del usuario: ").strip()
         matricula = input("PASO 3: Ingrese la Matrícula (ej: S22002198): ").strip()
 
@@ -136,13 +143,14 @@ def registrar_usuario():
             time.sleep(2)
             return
             
-        # PASO 3: Guardar en USUARIOS.CSV y actualizar el diccionario en memoria
         with open(ARCHIVO_USUARIOS, mode='a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([uid_nuevo, nombre, matricula])
         
-        # Actualizar la estructura global
         USUARIOS[uid_nuevo] = {'nombre': nombre, 'matricula': matricula}
+        # Inicializar el estado de este nuevo usuario
+        ESTADOS_ACCESO[uid_nuevo] = {'estado': 'SALIDA', 'ultima_entrada': ''}
+        guardar_estados() # Guardar el estado inicial
         
         print("\n" + "#"*50)
         print(f"¡USUARIO '{nombre}' REGISTRADO CON ÉXITO!")
@@ -156,13 +164,27 @@ def registrar_usuario():
         print(f"\nError en el registro: {e}")
 
 # ==============================================================================
-# 3. FUNCIÓN DE CONTROL DE ACCESO (ENTRADA/SALIDA)
+# 3. FUNCIÓN DE CONTROL DE ACCESO (ENTRADA/SALIDA Y CÁLCULO)
 # ==============================================================================
 
+def calcular_permanencia(timestamp_entrada):
+    """Calcula la diferencia entre la hora actual y la hora de entrada."""
+    try:
+        # Convertir la cadena de entrada a objeto datetime
+        dt_entrada = datetime.strptime(timestamp_entrada, "%Y-%m-%d %H:%M:%S")
+        dt_salida = datetime.now()
+        
+        # Calcular la diferencia (timedelta object)
+        diferencia = dt_salida - dt_entrada
+        
+        # Convertir a horas con dos decimales
+        horas_totales = diferencia.total_seconds() / 3600
+        return f"{horas_totales:.2f}"
+    except Exception:
+        return "N/A" # En caso de error de formato
+
 def iniciar_lector_control():
-    """
-    Función principal de lectura de tarjetas con lógica de Entrada/Salida.
-    """
+    """Función principal de lectura con lógica de Entrada/Salida y cálculo."""
     print("\n" + "="*50)
     print("     MODO CONTROL DE ACCESO (ENTRADA/SALIDA)")
     print(f"   {len(USUARIOS)} usuarios registrados. (Ctrl+C para Menú)")
@@ -171,42 +193,59 @@ def iniciar_lector_control():
     try:
         while True:
             print("\nEsperando tarjeta...")
-            # read_id() bloquea hasta que detecta una tarjeta
             id_unico = reader.read_id()
             
             if id_unico:
                 print("-" * 50)
                 
-                # 1. COMPROBAR SI EL USUARIO EXISTE
                 if id_unico in USUARIOS:
                     datos_usuario = USUARIOS[id_unico]
-                    estado_anterior = ESTADOS_ACCESO.get(id_unico, 'SALIDA') # Estado por defecto si es nuevo
+                    estado_data = ESTADOS_ACCESO.get(id_unico, {'estado': 'SALIDA', 'ultima_entrada': ''})
+                    estado_anterior = estado_data['estado']
                     
-                    # 2. DETERMINAR EL NUEVO ESTADO (Lógica ENTRADA/SALIDA)
+                    datos_para_registro = {
+                        "uid": id_unico,
+                        "nombre": datos_usuario['nombre'],
+                        "matricula": datos_usuario['matricula']
+                    }
+
                     if estado_anterior == 'SALIDA':
+                        # --- ENTRADA (Check-in) ---
                         nuevo_estado = 'ENTRADA'
+                        tiempo_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
                         print(f"[{nuevo_estado}] Bienvenid@: {datos_usuario['nombre']}")
+                        
+                        # Actualizar estado y registrar hora de entrada
+                        ESTADOS_ACCESO[id_unico] = {'estado': nuevo_estado, 'ultima_entrada': tiempo_actual}
+                        registrar_evento_acceso(datos_para_registro, nuevo_estado)
+                        
                     else:
+                        # --- SALIDA (Check-out) ---
                         nuevo_estado = 'SALIDA'
+                        timestamp_entrada = estado_data['ultima_entrada']
+                        
                         print(f"[{nuevo_estado}] Hasta pronto: {datos_usuario['nombre']}")
                         
-                    # 3. REGISTRAR Y ACTUALIZAR DATOS
-                    
-                    # Log al archivo de registro (txt)
-                    registrar_evento(datos_usuario, nuevo_estado)
-                    
-                    # Actualizar estado en memoria y en el archivo de estados (csv)
-                    ESTADOS_ACCESO[id_unico] = nuevo_estado
-                    guardar_estados()
-                    
+                        # Calcular y registrar el tiempo de permanencia
+                        tiempo_total = calcular_permanencia(timestamp_entrada)
+                        
+                        if tiempo_total != "N/A":
+                            print(f"   -> Permanencia: {tiempo_total} horas")
+                            registrar_tiempo_permanencia(datos_para_registro, tiempo_total)
+                        
+                        # Actualizar estado y borrar hora de entrada
+                        ESTADOS_ACCESO[id_unico] = {'estado': nuevo_estado, 'ultima_entrada': ''}
+                        registrar_evento_acceso(datos_para_registro, nuevo_estado)
+                        
+                    guardar_estados() # Guardar el estado actualizado
+
                 else:
-                    # ACCESO DENEGADO (Tarjeta no registrada)
+                    # TARJETA NO REGISTRADA
                     print(f"ACCESO DENEGADO. UID: {id_unico}")
                     print("-> Tarjeta NO registrada. Use la opción '1' para registrar.")
                 
                 print("-" * 50)
-                
-                # Esperar 3 segundos para evitar doble lectura
                 time.sleep(3) 
 
     except KeyboardInterrupt:
@@ -214,7 +253,7 @@ def iniciar_lector_control():
     except Exception as e:
         print(f"*** ERROR crítico en el lector: {e}")
     finally:
-        pass # La limpieza de GPIO se hace al salir del programa completo.
+        pass
 
 # ==============================================================================
 # 4. FUNCIÓN MENÚ PRINCIPAL
@@ -223,12 +262,12 @@ def iniciar_lector_control():
 def menu_principal():
     """Muestra el menú de opciones."""
     while True:
-        os.system('clear') # Limpia la consola (funciona en Linux/Raspbian)
+        os.system('clear')
         print("\n" + "*"*50)
         print("      SISTEMA UNIFICADO DE ACCESO NFC/RFID")
         print("*"*50)
         print(f"Usuarios cargados: {len(USUARIOS)}")
-        print(f"Archivo de logs: {ARCHIVO_REGISTRO}")
+        print(f"Registro de Tiempos en: {ARCHIVO_TIEMPOS}")
         print("\nOpciones:")
         print(" [1] -> REGISTRAR NUEVO USUARIO (Alta de Tarjeta)")
         print(" [2] -> INICIAR LECTOR DE ACCESO (Entrada/Salida)")
