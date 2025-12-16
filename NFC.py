@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 """
 Sistema de Registro NFC con MFRC522 para Raspberry Pi 4
@@ -7,34 +9,51 @@ Requiere: pip3 install mfrc522 spidev
 import json
 from datetime import datetime
 import os
+import signal
+import sys
 from mfrc522 import SimpleMFRC522
 import RPi.GPIO as GPIO
+import time
 
 class RegistroNFC:
     def __init__(self, archivo='registros.json'):
         self.archivo = archivo
         self.registros = self.cargar_registros()
-        self.reader = SimpleMFRC522()
-        print("✓ Lector MFRC522 inicializado")
+        self.ultima_lectura = None
+        self.tiempo_ultima_lectura = 0
+        self.tiempo_cooldown = 3  # segundos entre lecturas de la misma tarjeta
+        
+        # Inicializar lector con configuración mejorada
+        try:
+            GPIO.setwarnings(False)
+            self.reader = SimpleMFRC522()
+            print("✓ Lector MFRC522 inicializado correctamente")
+        except Exception as e:
+            print(f"✗ Error al inicializar lector: {e}")
+            print("Verifica las conexiones SPI")
+            sys.exit(1)
     
     def cargar_registros(self):
         """Carga registros existentes del archivo"""
         if os.path.exists(self.archivo):
-            with open(self.archivo, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(self.archivo, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return []
         return []
     
     def guardar_registros(self):
         """Guarda registros en el archivo"""
-        with open(self.archivo, 'w', encoding='utf-8') as f:
-            json.dump(self.registros, f, indent=2, ensure_ascii=False)
+        try:
+            with open(self.archivo, 'w', encoding='utf-8') as f:
+                json.dump(self.registros, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"✗ Error al guardar: {e}")
     
     def escribir_tarjeta(self, id_persona, nombre, tipo='E'):
         """
         Escribe datos en la tarjeta NFC
-        id_persona: ID único (ej: "12345678")
-        nombre: Nombre completo
-        tipo: E=Empleado, V=Visitante, etc.
         """
         try:
             datos = json.dumps({
@@ -47,50 +66,90 @@ class RegistroNFC:
             tamaño = len(datos.encode('utf-8'))
             if tamaño > 130:
                 print(f"✗ Error: Datos muy grandes ({tamaño} bytes). Máximo 130 bytes")
+                print("Intenta con un nombre más corto")
                 return False
             
-            print(f"\nAcerca la tarjeta para escribir...")
-            print(f"Datos: {datos} ({tamaño} bytes)")
+            print(f"\n📝 Datos a escribir: {datos} ({tamaño} bytes)")
+            print("🔄 Acerca la tarjeta al lector...")
+            print("(Mantenla cerca hasta que termine)")
             
-            self.reader.write(datos)
-            print("✓ Tarjeta escrita exitosamente")
-            return True
+            # Intentar escribir con reintentos
+            max_intentos = 3
+            for intento in range(max_intentos):
+                try:
+                    self.reader.write(datos)
+                    print("\n✓ ¡Tarjeta escrita exitosamente!")
+                    time.sleep(1)
+                    
+                    # Verificar escritura
+                    print("🔍 Verificando escritura...")
+                    time.sleep(0.5)
+                    _, texto_leido = self.reader.read_no_block()
+                    if texto_leido and texto_leido.strip() == datos:
+                        print("✓ Verificación exitosa")
+                        return True
+                    else:
+                        print("⚠️  Advertencia: No se pudo verificar, pero probablemente esté escrita")
+                        return True
+                        
+                except Exception as e:
+                    if intento < max_intentos - 1:
+                        print(f"⚠️  Intento {intento + 1} falló, reintentando...")
+                        time.sleep(1)
+                    else:
+                        print(f"✗ Error al escribir después de {max_intentos} intentos")
+                        return False
+            
+            return False
             
         except Exception as e:
             print(f"✗ Error al escribir tarjeta: {e}")
             return False
     
-    def leer_tarjeta(self):
-        """Lee datos de la tarjeta NFC"""
+    def leer_tarjeta_segura(self):
+        """Lee datos de la tarjeta NFC con manejo de errores mejorado"""
         try:
-            print("Esperando tarjeta NFC...")
-            id_tarjeta, texto = self.reader.read()
+            # Usar read_no_block para evitar bloqueos
+            id_tarjeta, texto = self.reader.read_no_block()
             
-            if texto:
+            if id_tarjeta and texto:
                 texto = texto.strip()
-                print(f"✓ Tarjeta detectada (ID: {id_tarjeta})")
-                return texto
-            return None
+                
+                # Evitar lecturas duplicadas rápidas
+                tiempo_actual = time.time()
+                if (self.ultima_lectura == id_tarjeta and 
+                    tiempo_actual - self.tiempo_ultima_lectura < self.tiempo_cooldown):
+                    return None, None
+                
+                self.ultima_lectura = id_tarjeta
+                self.tiempo_ultima_lectura = tiempo_actual
+                
+                return id_tarjeta, texto
+            
+            return None, None
             
         except Exception as e:
-            print(f"✗ Error al leer tarjeta: {e}")
-            return None
+            # Ignorar errores de lectura comunes
+            if "AUTH ERROR" not in str(e):
+                print(f"⚠️  Error de lectura: {e}")
+            return None, None
     
     def registrar_acceso(self, datos_nfc, accion='entrada'):
-        """
-        Registra entrada o salida de una persona
-        datos_nfc: string JSON del NFC
-        accion: 'entrada' o 'salida'
-        """
+        """Registra entrada o salida de una persona"""
         try:
             # Parsear datos del NFC
             persona = json.loads(datos_nfc)
+            
+            # Validar campos requeridos
+            if 'i' not in persona or 'n' not in persona:
+                print("✗ Error: Tarjeta sin formato válido")
+                return False
             
             # Crear registro
             registro = {
                 'id': persona['i'],
                 'nombre': persona['n'],
-                'tipo': persona['t'],
+                'tipo': persona.get('t', 'E'),
                 'accion': accion,
                 'timestamp': datetime.now().isoformat(),
                 'fecha': datetime.now().strftime('%Y-%m-%d'),
@@ -100,18 +159,20 @@ class RegistroNFC:
             self.registros.append(registro)
             self.guardar_registros()
             
-            print(f"\n{'='*50}")
-            print(f"✓ {accion.upper()}: {persona['n']}")
-            print(f"  ID: {persona['i']} | Tipo: {persona['t']}")
-            print(f"  Fecha: {registro['fecha']} | Hora: {registro['hora']}")
-            print(f"{'='*50}\n")
+            # Mostrar confirmación visual
+            simbolo = "📥" if accion == 'entrada' else "📤"
+            print(f"\n{'='*60}")
+            print(f"{simbolo} {accion.upper()}: {persona['n']}")
+            print(f"   ID: {persona['i']} | Tipo: {persona.get('t', 'E')}")
+            print(f"   Fecha: {registro['fecha']} | Hora: {registro['hora']}")
+            print(f"{'='*60}\n")
             return True
             
         except json.JSONDecodeError:
-            print("✗ Error: Datos NFC inválidos")
+            print("✗ Error: Datos NFC con formato JSON inválido")
             return False
-        except KeyError as e:
-            print(f"✗ Error: Falta el campo {e}")
+        except Exception as e:
+            print(f"✗ Error al registrar: {e}")
             return False
     
     def obtener_estado_actual(self):
@@ -129,11 +190,10 @@ class RegistroNFC:
     
     def determinar_accion(self, id_persona):
         """Determina si la próxima acción debe ser entrada o salida"""
-        # Buscar último registro de esta persona
         registros_persona = [r for r in self.registros if r['id'] == id_persona]
         
         if not registros_persona:
-            return 'entrada'  # Primera vez
+            return 'entrada'
         
         ultimo = registros_persona[-1]
         return 'salida' if ultimo['accion'] == 'entrada' else 'entrada'
@@ -156,7 +216,7 @@ class RegistroNFC:
         dentro = self.obtener_estado_actual()
         
         print("\n" + "="*60)
-        print(f"RESUMEN DEL DÍA - {stats['fecha']}")
+        print(f"📊 RESUMEN DEL DÍA - {stats['fecha']}")
         print("="*60)
         print(f"📥 Entradas totales: {stats['entradas']}")
         print(f"📤 Salidas totales: {stats['salidas']}")
@@ -174,39 +234,61 @@ class RegistroNFC:
     
     def limpiar(self):
         """Limpia recursos GPIO"""
-        GPIO.cleanup()
+        try:
+            GPIO.cleanup()
+        except:
+            pass
 
 
 def menu_principal():
     """Muestra el menú principal"""
     print("\n" + "="*60)
-    print("SISTEMA DE REGISTRO NFC - MFRC522")
+    print("🔐 SISTEMA DE REGISTRO NFC - MFRC522")
     print("="*60)
-    print("1. Modo Registro (lectura automática)")
-    print("2. Escribir nueva tarjeta")
-    print("3. Ver resumen del día")
-    print("4. Buscar por ID")
-    print("5. Salir")
+    print("1. 🔄 Modo Registro (lectura automática)")
+    print("2. ✍️  Escribir nueva tarjeta")
+    print("3. 📊 Ver resumen del día")
+    print("4. 🔍 Buscar por ID")
+    print("5. 🧪 Test del lector")
+    print("6. 🚪 Salir")
     print("="*60)
 
 
 def modo_registro(sistema):
     """Modo de registro continuo"""
-    print("\n🔄 MODO REGISTRO ACTIVADO")
-    print("Acerca tarjetas NFC para registrar entrada/salida")
-    print("Presiona Ctrl+C para volver al menú\n")
+    print("\n" + "="*60)
+    print("🔄 MODO REGISTRO ACTIVADO")
+    print("="*60)
+    print("✓ Acerca tarjetas NFC para registrar entrada/salida")
+    print("✓ Presiona Ctrl+C para volver al menú")
+    print("✓ Espera 3 segundos entre lecturas de la misma tarjeta")
+    print("="*60 + "\n")
+    
+    intentos_sin_tarjeta = 0
     
     try:
         while True:
-            datos = sistema.leer_tarjeta()
-            if datos:
+            id_tarjeta, datos = sistema.leer_tarjeta_segura()
+            
+            if id_tarjeta and datos:
+                intentos_sin_tarjeta = 0
+                print(f"📱 Tarjeta detectada (ID: {id_tarjeta})")
+                
                 try:
                     persona = json.loads(datos)
-                    # Determinar automáticamente si es entrada o salida
                     accion = sistema.determinar_accion(persona['i'])
                     sistema.registrar_acceso(datos, accion)
-                except:
-                    print("✗ Tarjeta con formato incorrecto\n")
+                except json.JSONDecodeError:
+                    print("✗ Tarjeta con formato incorrecto")
+                    print(f"   Contenido: {datos[:50]}...")
+                except Exception as e:
+                    print(f"✗ Error: {e}")
+            else:
+                intentos_sin_tarjeta += 1
+                if intentos_sin_tarjeta % 20 == 0:  # Cada ~2 segundos
+                    print("⏳ Esperando tarjeta...", end='\r')
+            
+            time.sleep(0.1)  # Pequeña pausa para no saturar
             
     except KeyboardInterrupt:
         print("\n\n✓ Volviendo al menú...")
@@ -214,11 +296,19 @@ def modo_registro(sistema):
 
 def modo_escritura(sistema):
     """Modo para escribir nuevas tarjetas"""
-    print("\n✍️  ESCRIBIR NUEVA TARJETA")
-    print("-" * 60)
+    print("\n" + "="*60)
+    print("✍️  ESCRIBIR NUEVA TARJETA")
+    print("="*60)
     
     id_persona = input("ID (8 dígitos): ").strip()
+    if len(id_persona) != 8 or not id_persona.isdigit():
+        print("✗ El ID debe tener exactamente 8 dígitos")
+        return
+    
     nombre = input("Nombre completo: ").strip()
+    if len(nombre) < 3:
+        print("✗ El nombre es muy corto")
+        return
     
     print("\nTipo de persona:")
     print("  E - Empleado")
@@ -226,10 +316,48 @@ def modo_escritura(sistema):
     print("  A - Administrador")
     tipo = input("Tipo (E/V/A): ").strip().upper() or 'E'
     
+    if tipo not in ['E', 'V', 'A']:
+        print("✗ Tipo no válido, usando 'E' por defecto")
+        tipo = 'E'
+    
+    print()
     sistema.escribir_tarjeta(id_persona, nombre, tipo)
 
 
+def test_lector(sistema):
+    """Prueba básica del lector"""
+    print("\n" + "="*60)
+    print("🧪 TEST DEL LECTOR MFRC522")
+    print("="*60)
+    print("Acerca una tarjeta NFC...")
+    print("Presiona Ctrl+C para cancelar\n")
+    
+    try:
+        while True:
+            id_tarjeta, texto = sistema.leer_tarjeta_segura()
+            if id_tarjeta:
+                print(f"\n✓ ¡Tarjeta detectada!")
+                print(f"   ID: {id_tarjeta}")
+                print(f"   Contenido: {texto if texto else '(vacío)'}")
+                print(f"   Longitud: {len(texto) if texto else 0} caracteres\n")
+                break
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\n✓ Test cancelado")
+
+
+def signal_handler(sig, frame):
+    """Maneja la señal de interrupción"""
+    print("\n\n👋 Cerrando sistema...")
+    GPIO.cleanup()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    # Configurar manejador de señales
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    print("\n🚀 Iniciando sistema...")
     sistema = RegistroNFC()
     
     try:
@@ -245,6 +373,7 @@ if __name__ == "__main__":
             
             elif opcion == '3':
                 sistema.mostrar_resumen()
+                input("\nPresiona Enter para continuar...")
             
             elif opcion == '4':
                 id_buscar = input("\nID a buscar: ").strip()
@@ -252,13 +381,17 @@ if __name__ == "__main__":
                 if registros:
                     print(f"\n📋 Registros encontrados: {len(registros)}")
                     print("-" * 60)
-                    for r in registros[-10:]:  # Últimos 10
+                    for r in registros[-10:]:
                         print(f"{r['fecha']} {r['hora']} - {r['accion'].upper()}: {r['nombre']}")
                 else:
                     print("✗ No se encontraron registros")
                 input("\nPresiona Enter para continuar...")
             
             elif opcion == '5':
+                test_lector(sistema)
+                input("\nPresiona Enter para continuar...")
+            
+            elif opcion == '6':
                 print("\n👋 Cerrando sistema...")
                 break
             
@@ -270,4 +403,4 @@ if __name__ == "__main__":
     
     finally:
         sistema.limpiar()
-        print("✓ Recursos liberados. Adiós!")
+        print("✓ Recursos liberados. ¡Adiós!")
