@@ -2,24 +2,29 @@ import RPi.GPIO as GPIO
 from mfrc522 import SimpleMFRC522
 import time
 
+# Crea una instancia de la clase SimpleMFRC522
 reader = SimpleMFRC522()
 
+print("--- Diagnóstico: Lectura de ID Único (UID) ---")
+print("Coloca CUALQUIER tarjeta cerca del lector para ver su ID...")
+
 try:
-    print("Intentando leer solo el ID Único (UID)...")
     while True:
-        # El método read_id_non_block no necesita autenticación de sector, solo lee el UID
-        id = reader.read_id_non_block()
-        if id:
-            print(f"ID Único detectado: {id}")
-            # Si esto funciona, el SPI está bien, y el problema es la autenticación (AUTH ERROR).
-            time.sleep(2)
-        else:
-            time.sleep(0.1)
+        # read_id() lee solo el UID y bloquea el programa hasta que lo encuentra.
+        # Es la forma más simple de verificar la comunicación SPI/Hardware.
+        id_unico = reader.read_id()
+        
+        if id_unico:
+            print("-" * 40)
+            print(f"¡Hardware OK! ID Único detectado: {id_unico}")
+            print("-" * 40)
+            time.sleep(2) # Espera 2 segundos antes de volver a buscar
+        
+        # Nota: read_id() ya bloquea el programa, por lo que el sleep(0.1) anterior no es necesario.
 
 except KeyboardInterrupt:
-    GPIO.cleanup()
+    print("\nPrograma detenido.")
 
-except Exception as e:
-    # Si la tarjeta ni siquiera puede leer el ID aquí, el cableado o SPI sigue siendo la causa.
-    print(f"Error general: {e}") 
+finally:
     GPIO.cleanup()
+    print("Limpieza de GPIO completada.")
